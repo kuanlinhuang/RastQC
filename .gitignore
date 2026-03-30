@@ -1,0 +1,19 @@
+# Build artifacts
+/target/
+**/*.rs.bk
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+/tests/tmp/
+
+# Original FastQC Java repo (reference only, not part of RastQC)
+/FastQC/

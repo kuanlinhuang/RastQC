@@ -1,0 +1,87 @@
+mod fastq;
+mod bam;
+
+use anyhow::{bail, Result};
+use std::path::Path;
+
+/// A single sequence record
+#[derive(Debug, Clone)]
+pub struct Sequence {
+    pub header: String,
+    pub sequence: Vec<u8>,
+    pub quality: Vec<u8>,
+    pub filtered: bool,
+}
+
+impl Sequence {
+    pub fn len(&self) -> usize {
+        self.sequence.len()
+    }
+
+    #[allow(dead_code)]
+    pub fn gc_percent(&self) -> f64 {
+        if self.sequence.is_empty() {
+            return 0.0;
+        }
+        let gc = self
+            .sequence
+            .iter()
+            .filter(|&&b| b == b'G' || b == b'C' || b == b'g' || b == b'c')
+            .count();
+        let valid = self
+            .sequence
+            .iter()
+            .filter(|&&b| b != b'N' && b != b'n')
+            .count();
+        if valid == 0 {
+            return 0.0;
+        }
+        (gc as f64 / valid as f64) * 100.0
+    }
+}
+
+/// Unified reader for FASTQ, BAM, SAM files
+pub enum SequenceReader {
+    Fastq(fastq::FastqReader),
+    Bam(bam::BamReader),
+}
+
+impl SequenceReader {
+    pub fn open(path: &Path) -> Result<Self> {
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_lowercase();
+
+        if name.ends_with(".bam") {
+            Ok(SequenceReader::Bam(bam::BamReader::open(path)?))
+        } else if name.ends_with(".sam") {
+            Ok(SequenceReader::Bam(bam::BamReader::open_sam(path)?))
+        } else if name.ends_with(".fastq")
+            || name.ends_with(".fq")
+            || name.ends_with(".fastq.gz")
+            || name.ends_with(".fq.gz")
+            || name.ends_with(".fastq.bz2")
+            || name.ends_with(".fq.bz2")
+        {
+            Ok(SequenceReader::Fastq(fastq::FastqReader::open(path)?))
+        } else {
+            // Try FASTQ as default
+            match fastq::FastqReader::open(path) {
+                Ok(r) => Ok(SequenceReader::Fastq(r)),
+                Err(_) => bail!(
+                    "Unrecognized file format: {}. Supported: .fastq, .fq, .bam, .sam (with optional .gz/.bz2 compression)",
+                    path.display()
+                ),
+            }
+        }
+    }
+
+    pub fn next_sequence(&mut self) -> Result<Option<Sequence>> {
+        match self {
+            SequenceReader::Fastq(r) => r.next_sequence(),
+            SequenceReader::Bam(r) => r.next_sequence(),
+        }
+    }
+}

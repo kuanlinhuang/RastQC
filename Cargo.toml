@@ -1,0 +1,24 @@
+[package]
+name = "rastqc"
+version = "0.1.0"
+edition = "2021"
+description = "RastQC - A fast quality control tool for high throughput sequence data, written in Rust"
+
+[[bin]]
+name = "rastqc"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+flate2 = "1"
+bzip2 = "0.5"
+noodles = { version = "0.88", features = ["bam", "sam", "bgzf", "csi", "fastq"] }
+rayon = "1"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+base64 = "0.22"
+anyhow = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "fs"] }
+
+[profile.release]
+opt-level = 3
+lto = true
