@@ -207,10 +207,14 @@ fn test_text_data_modules_present() {
     assert!(data.contains(">>Sequence Duplication Levels"));
     assert!(data.contains(">>Overrepresented sequences"));
     assert!(data.contains(">>Adapter Content"));
+    assert!(data.contains(">>Kmer Content"));
+    assert!(data.contains(">>Read Length N50"));
+    assert!(data.contains(">>Quality Stratified Length"));
+    assert!(data.contains(">>Homopolymer Content"));
 
-    // Verify each module ends properly
+    // Verify each module ends properly (12 original + 3 long-read = 15)
     let module_count = data.matches(">>END_MODULE").count();
-    assert!(module_count >= 11, "Expected >=11 END_MODULE markers, got {}", module_count);
+    assert!(module_count >= 15, "Expected >=15 END_MODULE markers, got {}", module_count);
 
     cleanup(&outdir);
 }

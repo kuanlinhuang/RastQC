@@ -1,5 +1,8 @@
 mod fastq;
 mod bam;
+pub mod colorspace;
+mod fast5;
+mod pod5;
 
 use anyhow::{bail, Result};
 use std::path::Path;
@@ -40,10 +43,12 @@ impl Sequence {
     }
 }
 
-/// Unified reader for FASTQ, BAM, SAM files
+/// Unified reader for FASTQ, BAM, SAM, Fast5, POD5 files
 pub enum SequenceReader {
     Fastq(fastq::FastqReader),
     Bam(bam::BamReader),
+    Fast5(fast5::Fast5Reader),
+    Pod5(pod5::Pod5Reader),
 }
 
 impl SequenceReader {
@@ -54,7 +59,11 @@ impl SequenceReader {
             .to_string_lossy()
             .to_lowercase();
 
-        if name.ends_with(".bam") {
+        if name.ends_with(".fast5") {
+            Ok(SequenceReader::Fast5(fast5::Fast5Reader::open(path)?))
+        } else if name.ends_with(".pod5") {
+            Ok(SequenceReader::Pod5(pod5::Pod5Reader::open(path)?))
+        } else if name.ends_with(".bam") {
             Ok(SequenceReader::Bam(bam::BamReader::open(path)?))
         } else if name.ends_with(".sam") {
             Ok(SequenceReader::Bam(bam::BamReader::open_sam(path)?))
@@ -78,10 +87,17 @@ impl SequenceReader {
         }
     }
 
+    /// Create a reader that reads FASTQ from stdin.
+    pub fn from_stdin() -> Self {
+        SequenceReader::Fastq(fastq::FastqReader::from_stdin())
+    }
+
     pub fn next_sequence(&mut self) -> Result<Option<Sequence>> {
         match self {
             SequenceReader::Fastq(r) => r.next_sequence(),
             SequenceReader::Bam(r) => r.next_sequence(),
+            SequenceReader::Fast5(r) => r.next_sequence(),
+            SequenceReader::Pod5(r) => r.next_sequence(),
         }
     }
 }

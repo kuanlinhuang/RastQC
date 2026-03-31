@@ -10,9 +10,12 @@ pub mod duplication;
 pub mod overrepresented;
 pub mod adapter_content;
 pub mod kmer_content;
+pub mod long_read_quality;
 
 use crate::config::FastQCConfig;
 use crate::io::Sequence;
+use serde_json::Value as JsonValue;
+use std::any::Any;
 
 /// QC result status
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -71,6 +74,83 @@ pub trait QCModule: Send {
     fn has_chart(&self) -> bool {
         true
     }
+
+    /// For downcasting in merge operations.
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+
+    /// Merge another module instance's accumulated state into this one.
+    /// Called during intra-file parallel processing to combine chunk results.
+    /// Default: no-op (modules that don't implement merge fall back to sequential).
+    fn merge_from(&mut self, _other: &mut dyn QCModule) {}
+
+    /// Whether this module supports merging parallel chunk results.
+    #[allow(dead_code)]
+    fn supports_merge(&self) -> bool {
+        false
+    }
+
+    /// Export module data as a JSON value for MultiQC native format.
+    /// Default implementation parses text_data() into a structured JSON object.
+    fn json_data(&self) -> JsonValue {
+        text_data_to_json(&self.text_data(), self.name(), self.result())
+    }
+}
+
+/// Merge two module sets. Each module in `target` merges from the corresponding
+/// module in `source`. Both sets must have the same modules in the same order
+/// (as produced by ModuleFactory::create_modules).
+pub fn merge_module_sets(
+    target: &mut [Box<dyn QCModule>],
+    source: &mut [Box<dyn QCModule>],
+) {
+    assert_eq!(target.len(), source.len());
+    for (t, s) in target.iter_mut().zip(source.iter_mut()) {
+        t.merge_from(s.as_mut());
+    }
+}
+
+/// Parse tab-separated text_data into a JSON object with headers and rows.
+fn text_data_to_json(text: &str, module_name: &str, result: QCResult) -> JsonValue {
+    let mut headers: Vec<String> = Vec::new();
+    let mut rows: Vec<JsonValue> = Vec::new();
+
+    for line in text.lines() {
+        if line.starts_with(">>END_MODULE") {
+            break;
+        }
+        if line.starts_with(">>") {
+            continue;
+        }
+        if line.starts_with('#') {
+            headers = line
+                .trim_start_matches('#')
+                .split('\t')
+                .map(|s| s.trim().to_string())
+                .collect();
+            continue;
+        }
+        if headers.is_empty() {
+            continue;
+        }
+        let values: Vec<&str> = line.split('\t').collect();
+        let mut row = serde_json::Map::new();
+        for (i, val) in values.iter().enumerate() {
+            let key = headers.get(i).cloned().unwrap_or_else(|| format!("col_{}", i));
+            // Try to parse as number
+            if let Ok(n) = val.parse::<f64>() {
+                row.insert(key, serde_json::json!(n));
+            } else {
+                row.insert(key, serde_json::json!(val));
+            }
+        }
+        rows.push(JsonValue::Object(row));
+    }
+
+    serde_json::json!({
+        "module_name": module_name,
+        "status": result.label(),
+        "data": rows
+    })
 }
 
 /// Base group for aggregating positions
@@ -275,6 +355,17 @@ impl ModuleFactory {
         }
         if !config.is_ignored("kmer") {
             modules.push(Box::new(kmer_content::KmerContent::new(config.kmer_size)));
+        }
+
+        // Long-read QC metrics
+        if !config.is_ignored("read_length_n50") {
+            modules.push(Box::new(long_read_quality::ReadLengthN50::new()));
+        }
+        if !config.is_ignored("quality_stratified_length") {
+            modules.push(Box::new(long_read_quality::QualityStratifiedLength::new()));
+        }
+        if !config.is_ignored("homopolymer") {
+            modules.push(Box::new(long_read_quality::HomopolymerErrors::new()));
         }
 
         modules

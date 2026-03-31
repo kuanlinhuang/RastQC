@@ -1,3 +1,4 @@
+use std::any::Any;
 use crate::config::FastQCConfig;
 use crate::io::Sequence;
 use super::{BaseGroup, PhredEncoding, QCModule, QCResult};
@@ -378,5 +379,25 @@ impl QCModule for PerBaseQuality {
 
         svg.push_str("</svg>");
         svg
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn merge_from(&mut self, other: &mut dyn QCModule) {
+        if let Some(other) = other.as_any_mut().downcast_mut::<Self>() {
+            self.ensure_length(other.quality_counts.len());
+            for (i, oqc) in other.quality_counts.iter().enumerate() {
+                for j in 0..128 {
+                    self.quality_counts[i].counts[j] += oqc.counts[j];
+                }
+                self.quality_counts[i].total += oqc.total;
+            }
+        }
+    }
+
+    fn supports_merge(&self) -> bool {
+        true
     }
 }

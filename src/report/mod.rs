@@ -1,6 +1,7 @@
 use crate::modules::{QCModule, QCResult};
 use crate::FileSummary;
 use std::io::Write;
+use serde_json;
 
 pub fn generate_html_report(filename: &str, modules: &[Box<dyn QCModule>]) -> String {
     let mut html = String::with_capacity(64 * 1024);
@@ -152,6 +153,34 @@ pub fn generate_summary_txt(filename: &str, modules: &[Box<dyn QCModule>]) -> St
         ));
     }
     out
+}
+
+/// Generate native MultiQC JSON output for a single file's QC modules.
+/// This produces a JSON object keyed by module name with structured data,
+/// eliminating the need for MultiQC to parse fastqc_data.txt.
+pub fn generate_multiqc_json(filename: &str, modules: &[Box<dyn QCModule>]) -> String {
+    let mut top = serde_json::Map::new();
+
+    // Report metadata
+    top.insert(
+        "report_metadata".to_string(),
+        serde_json::json!({
+            "tool": "RastQC",
+            "tool_version": "0.1.0",
+            "filename": filename,
+            "format_version": "1.0"
+        }),
+    );
+
+    // Module data
+    let mut module_data = serde_json::Map::new();
+    for module in modules {
+        let key = module.name().replace(' ', "_").to_lowercase();
+        module_data.insert(key, module.json_data());
+    }
+    top.insert("modules".to_string(), serde_json::Value::Object(module_data));
+
+    serde_json::to_string_pretty(&serde_json::Value::Object(top)).unwrap_or_default()
 }
 
 pub fn write_zip_archive(
@@ -356,6 +385,9 @@ fn abbreviate_module(name: &str) -> String {
         "Overrepresented sequences" => "Overrep".into(),
         "Adapter Content" => "Adapters".into(),
         "Kmer Content" => "Kmers".into(),
+        "Read Length N50" => "N50".into(),
+        "Quality Stratified Length" => "Q-Strat Len".into(),
+        "Homopolymer Content" => "Homopolymer".into(),
         other => other.into(),
     }
 }

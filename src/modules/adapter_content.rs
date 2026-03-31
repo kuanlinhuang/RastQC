@@ -1,6 +1,7 @@
 use crate::config::FastQCConfig;
 use crate::io::Sequence;
 use super::{BaseGroup, QCModule, QCResult};
+use std::any::Any;
 
 struct AdapterTracker {
     name: String,
@@ -252,5 +253,34 @@ impl QCModule for AdapterContent {
 
         svg.push_str("</svg>");
         svg
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn merge_from(&mut self, other: &mut dyn QCModule) {
+        if let Some(other) = other.as_any_mut().downcast_mut::<Self>() {
+            self.total_count += other.total_count;
+            if other.max_length > self.max_length {
+                self.max_length = other.max_length;
+            }
+            for (i, other_adapter) in other.adapters.iter().enumerate() {
+                if i < self.adapters.len() {
+                    let self_positions = &mut self.adapters[i].positions;
+                    // Extend self if other is longer
+                    while self_positions.len() < other_adapter.positions.len() {
+                        self_positions.push(0);
+                    }
+                    for (j, &val) in other_adapter.positions.iter().enumerate() {
+                        self_positions[j] += val;
+                    }
+                }
+            }
+        }
+    }
+
+    fn supports_merge(&self) -> bool {
+        true
     }
 }

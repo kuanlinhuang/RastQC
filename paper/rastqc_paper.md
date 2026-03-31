@@ -4,7 +4,7 @@
 
 ## Abstract
 
-Quality control (QC) of high-throughput sequencing data is a critical first step in genomics analysis pipelines. FastQC has served as the de facto standard for sequencing QC for over a decade, but its Java runtime dependency introduces startup overhead, elevated memory consumption, and deployment complexity. Here we present RastQC, a complete reimplementation of FastQC in Rust that provides all 12 standard QC modules with matching algorithms, MultiQC-compatible output formats, and a built-in multi-file summary dashboard. We benchmarked RastQC against FastQC v0.12.1 on both synthetic datasets (100K--10M reads) and real whole-genome sequencing data spanning five model organisms: *Escherichia coli*, *Saccharomyces cerevisiae*, *Drosophila melanogaster*, *Mus musculus*, and *Homo sapiens*. On synthetic data, RastQC achieves 1.7--5.6x speedup on uncompressed input and 32.5x speedup on gzip-compressed input, while using 15--26x less memory (22 MB vs. 340--644 MB). On real genome data, RastQC matches or exceeds FastQC speed across all organisms while achieving 100% module-level concordance (55/55 module calls identical across all organisms). RastQC compiles to a single 1.6 MB static binary with no external dependencies, representing a 134x reduction in deployment footprint. RastQC is freely available at https://github.com/kuanlinhuang/RastQC under the MIT license.
+Quality control (QC) of high-throughput sequencing data is a critical first step in genomics analysis pipelines. FastQC has served as the de facto standard for sequencing QC for over a decade, but its Java runtime dependency introduces startup overhead, elevated memory consumption, and deployment complexity. Here we present RastQC, a complete reimplementation of FastQC in Rust that provides all 12 standard QC modules with matching algorithms, plus 3 additional long-read QC modules, MultiQC-compatible output formats, native MultiQC JSON export, a built-in multi-file summary dashboard, and a web-based report viewer. RastQC also supports SOLiD colorspace reads, Oxford Nanopore Fast5/POD5 formats, standard input streaming, intra-file parallelism, and QC-aware exit codes for workflow integration. We benchmarked RastQC against FastQC v0.12.1 on both synthetic datasets (100K--1M reads) and real whole-genome sequencing data spanning five model organisms: *Escherichia coli*, *Saccharomyces cerevisiae*, *Drosophila melanogaster*, *Mus musculus*, and *Homo sapiens*. Despite running 15 modules (vs. FastQC's 11), RastQC achieves up to 3.9x speedup on small datasets and 500x faster startup, while using 4--9x less memory (59--125 MB vs. 551--638 MB). On real genome data, RastQC matches FastQC speed on most organisms while achieving 100% module-level concordance (55/55 module calls identical across all organisms for the 11 shared modules). RastQC compiles to a single 2.1 MB static binary with no external dependencies, representing a 102x reduction in deployment footprint. RastQC is freely available at https://github.com/kuanlinhuang/RastQC under the MIT license.
 
 ## Introduction
 
@@ -24,19 +24,23 @@ Here we present RastQC, a complete reimplementation of FastQC in Rust. RastQC im
 
 RastQC is organized into four modules reflecting the analysis pipeline:
 
-1. **I/O layer** (`io/`): Streaming parsers for FASTQ (plain, gzip, bzip2-compressed) and BAM/SAM formats via the noodles library (version 0.88). Sequences are processed one at a time to minimize memory footprint.
+1. **I/O layer** (`io/`): Streaming parsers for FASTQ (plain, gzip, bzip2-compressed), BAM/SAM formats via the noodles library, Oxford Nanopore Fast5 (HDF5) and POD5 (Apache Arrow IPC) formats (feature-gated), SOLiD colorspace auto-detection and decoding, and standard input streaming. Sequences are processed one at a time to minimize memory footprint.
 
-2. **QC modules** (`modules/`): Twelve independent analysis modules, each implementing a common `QCModule` trait that defines `process_sequence()`, `calculate_results()`, and output generation methods. Modules accumulate per-position statistics during the streaming pass and compute final results lazily.
+2. **QC modules** (`modules/`): Fifteen independent analysis modules, each implementing a common `QCModule` trait that defines `process_sequence()`, `calculate_results()`, merge support for parallel processing, and output generation methods. Modules accumulate per-position statistics during the streaming pass and compute final results lazily. All modules support accumulator-state merging for intra-file parallelism.
 
-3. **Configuration** (`config/`): Embedded default adapter sequences (6 entries), contaminant sequences (15 entries), and pass/warn/fail thresholds matching FastQC defaults. All configurations are overridable via command-line flags.
+3. **Configuration** (`config/`): Embedded default adapter sequences (6 entries), contaminant sequences (15 entries), and pass/warn/fail thresholds matching FastQC defaults. All configurations are overridable via command-line flags. Kmer Content is enabled by default.
 
-4. **Report generation** (`report/`): Self-contained HTML reports with inline SVG charts, tab-separated data files compatible with MultiQC, per-file `summary.txt` with module-level status, and ZIP archives. A multi-file summary dashboard (HTML + TSV) is generated when processing multiple samples.
+4. **Report generation** (`report/`): Self-contained HTML reports with inline SVG charts, tab-separated data files compatible with MultiQC, native MultiQC JSON output (`--multiqc-json`), per-file `summary.txt` with module-level status, and ZIP archives. A multi-file summary dashboard (HTML + TSV) is generated when processing multiple samples.
+
+5. **Web GUI** (`gui/`): A built-in HTTP server (`--serve`) provides a browser-based interface for navigating and viewing reports, with auto-browser launch and multi-sample summary access.
+
+6. **Parallel processing** (`parallel/`): Intra-file parallelism (`--parallel`) for large files buffers sequences in memory, distributes chunks across threads, and merges module states via accumulator combination. QC-aware exit codes (`--exit-code`) support automated pipeline gates.
 
 ### QC Modules
 
-RastQC implements all 12 FastQC modules with matching algorithms:
+RastQC implements all 12 FastQC modules with matching algorithms, plus 3 additional long-read QC modules:
 
-**Table 1.** QC modules implemented in RastQC.
+**Table 1.** QC modules implemented in RastQC. Modules marked with * are RastQC-exclusive.
 
 | Module | Description | Key Algorithm |
 |--------|-------------|---------------|
@@ -51,7 +55,10 @@ RastQC implements all 12 FastQC modules with matching algorithms:
 | Sequence Duplication Levels | Library complexity estimate | String-based tracking (first 50 bp); 100K unique cutoff with iterative binomial correction |
 | Overrepresented Sequences | High-frequency sequences with contaminant matching | Exact/approximate string matching; 1-mismatch tolerance for >20 bp |
 | Adapter Content | Known adapter contamination by position | Substring matching of 12-mer adapters with cumulative position counting |
-| K-mer Content | Positionally biased k-mers | 7-mer tracking with 2% sampling; binomial enrichment test |
+| K-mer Content | Positionally biased k-mers (enabled by default) | 7-mer tracking with 2% sampling; binomial enrichment test |
+| Read Length N50* | Assembly-style length statistics for long reads | Sorted-length N50/N90 computation; streaming min/max/mean |
+| Quality Stratified Length* | Length distribution binned by quality tier | 5-tier quality binning (Q<10 through Q40+); per-tier base counting |
+| Homopolymer Content* | Systematic homopolymer error detection | Run-length encoding; per-base run tracking (3--22 bp); fraction-based thresholds |
 
 ### MultiQC Compatibility
 
@@ -130,44 +137,43 @@ All benchmarks were run single-threaded to ensure fair per-file comparison.
 
 RastQC consistently outperformed FastQC on synthetic datasets (Table 3).
 
-**Table 3.** Performance comparison on synthetic datasets (single-threaded).
+**Table 3.** Performance comparison on synthetic datasets (single-threaded). RastQC runs 15 modules; FastQC runs 11.
 
 | Dataset | Reads | RastQC Time | FastQC Time | Speedup | RastQC RSS | FastQC RSS |
 |---------|-------|-------------|-------------|---------|------------|------------|
-| Startup (1 read) | 1 | 0.005 s | 2.66 s | 532x | 1.5 MB | 286 MB |
-| 100K synthetic | 100,000 | 1.50 s | 8.34 s | 5.6x | 22 MB | 343 MB |
-| 1M synthetic | 1,000,000 | 10.86 s | 21.90 s | 2.0x | 22 MB | 393 MB |
-| 1M gzipped | 1,000,000 | 12.44 s | 404.26 s | 32.5x | 22 MB | 546 MB |
-| 10M synthetic | 10,000,000 | 1,274 s | 2,158 s | 1.7x | 21 MB | 544 MB |
+| Startup (1 read) | 1 | <5 ms | 2.55 s | >500x | 2 MB | 278 MB |
+| 100K synthetic | 100,000 | 0.90 s | 3.55 s | 3.9x | 70 MB | 408 MB |
+| 1M synthetic | 1,000,000 | 8.15 s | 7.56 s | 0.9x | 79 MB | 558 MB |
+| 1M gzipped | 1,000,000 | 9.46 s | 8.58 s | 0.9x | 79 MB | 549 MB |
 
-The startup test (1 read) reveals a 532x difference: RastQC initializes in 5 ms as a native binary versus 2.66 s for JVM class loading. The most dramatic speedup (32.5x) was observed on gzip-compressed input, reflecting superior decompression performance of the Rust `flate2` crate compared to Java's `GZIPInputStream`.
+The startup test reveals a >500x difference: RastQC initializes in under 5 ms as a native binary versus 2.55 s for JVM class loading. On 100K reads, RastQC is 3.9x faster. On 1M reads, the tools are comparable in speed (RastQC runs 15 modules vs. FastQC's 11, a 36% increase in per-sequence computation). RastQC consistently uses 5--7x less memory across all dataset sizes.
 
 ### Performance on Real Genome Data
 
 We evaluated both tools on real Illumina whole-genome sequencing data from five model organisms (Table 4).
 
-**Table 4.** Performance comparison on real genome data across model organisms.
+**Table 4.** Performance comparison on real genome data across model organisms. RastQC runs 15 modules; FastQC runs 11.
 
 | Organism | Reads | Read Len | RastQC Time | FastQC Time | Speedup | RastQC RSS | FastQC RSS | Mem. Ratio |
 |----------|-------|----------|-------------|-------------|---------|------------|------------|------------|
-| *D. melanogaster* | 432,546 | 100 bp | 2.37 s | 4.85 s | 2.0x | 22 MB | 527 MB | 24x |
-| *S. cerevisiae* | 1,368,860 | 75 bp | 6.18 s | 7.58 s | 1.2x | 24 MB | 587 MB | 24x |
-| *E. coli* K-12 | 5,000,000 | 100 bp | 29.02 s | 24.68 s | 0.9x | 22 MB | 564 MB | 26x |
-| *M. musculus* | 1,619,240 | 151 bp | 11.03 s | 11.58 s | 1.1x | 22 MB | 592 MB | 27x |
-| *H. sapiens* | 2,392,582 | 150 bp | 16.15 s | 17.61 s | 1.1x | 35 MB | 644 MB | 18x |
+| *D. melanogaster* | 432,546 | 100 bp | 2.16 s | 4.76 s | 2.2x | 59 MB | 551 MB | 9x |
+| *S. cerevisiae* | 1,368,860 | 75 bp | 6.19 s | 6.56 s | 1.1x | 72 MB | 567 MB | 8x |
+| *E. coli* K-12 | 5,000,000 | 100 bp | 28.45 s | 19.59 s | 0.7x | 125 MB | 563 MB | 4x |
+| *M. musculus* | 1,619,240 | 151 bp | 10.61 s | 10.57 s | 1.0x | 91 MB | 583 MB | 6x |
+| *H. sapiens* | 2,392,582 | 150 bp | 16.33 s | 16.60 s | 1.0x | 117 MB | 638 MB | 5x |
 
-RastQC was faster than FastQC on 4 of 5 organisms, with speedups ranging from 1.1x (mouse, human) to 2.0x (fly). On the *E. coli* dataset, FastQC was marginally faster (0.9x), likely due to this dataset's characteristics favoring FastQC's internal optimizations for short uniform-length reads. Across all organisms, RastQC maintained a stable memory footprint of 22--35 MB, while FastQC required 527--644 MB (18--27x more memory).
+RastQC was faster than FastQC on the smallest dataset (fly, 2.2x speedup) and comparable on medium-sized datasets (yeast, mouse, human). On the largest dataset (E. coli, 5M reads), FastQC was faster (0.7x), reflecting the steady-state advantage of JVM JIT compilation on long-running workloads. Note that RastQC runs 4 additional modules (Kmer Content, Read Length N50, Quality Stratified Length, Homopolymer Content) compared to FastQC, representing a 36% increase in per-sequence computation.
 
-The human genome dataset is particularly relevant for clinical sequencing applications. RastQC processed 2.4M human reads in 16.2 s compared to FastQC's 17.6 s (1.1x speedup), while using 35 MB versus 644 MB of memory (18x reduction). For a typical 30x human whole-genome sequencing run (~900M reads), this memory difference enables substantially more concurrent QC analyses on shared compute infrastructure.
+Across all organisms, RastQC used 4--9x less memory (59--125 MB vs. 551--638 MB). The memory footprint scales with the Kmer Content module's hash table, which grows with sequence diversity. For a typical 30x human whole-genome sequencing run, this memory advantage enables substantially more concurrent QC analyses on shared compute infrastructure.
 
 ### Memory Usage
 
-RastQC's memory footprint remained remarkably stable across all datasets and organisms:
+RastQC's memory footprint remained significantly lower than FastQC across all datasets:
 
-- **RastQC**: 22--35 MB across all inputs (1 read to 10M reads, all organisms)
-- **FastQC**: 286--644 MB, scaling with input complexity and the JVM baseline
+- **RastQC**: 2--125 MB across all inputs (1 read to 5M reads, all organisms)
+- **FastQC**: 278--638 MB, dominated by the JVM baseline
 
-This 18--27x memory reduction reflects RastQC's streaming architecture, where only summary statistics are retained in memory. The constant-memory property is particularly valuable for HPC environments with strict memory limits per job.
+This 4--9x memory reduction on real genome data reflects RastQC's streaming architecture. The memory footprint scales moderately with sequence diversity due to the Kmer Content module's hash table (7-mers × positions), but remains well below FastQC's JVM-dominated overhead. This advantage is particularly valuable for HPC environments with strict memory limits per job.
 
 ### Binary Size and Deployment
 
@@ -175,12 +181,12 @@ This 18--27x memory reduction reflects RastQC's streaming architecture, where on
 
 | Component | RastQC | FastQC |
 |-----------|--------|--------|
-| Binary/package size | 1.6 MB | ~15 MB (JARs + classes) |
+| Binary/package size | 2.1 MB | ~15 MB (JARs + classes) |
 | Runtime dependency | None (static binary) | Java 11+ (~200 MB) |
-| Total deployment size | 1.6 MB | ~215 MB |
-| Reduction factor | **134x smaller** | -- |
+| Total deployment size | 2.1 MB | ~215 MB |
+| Reduction factor | **102x smaller** | -- |
 
-RastQC compiles to a single 1.6 MB statically-linked binary with no external dependencies. This is advantageous for Docker containers (smaller images, faster pulls), CI/CD pipelines, and HPC environments where module systems may not provide a compatible JRE.
+RastQC compiles to a single 2.1 MB statically-linked binary with no external dependencies. The slight size increase over 1.6 MB in earlier versions reflects the addition of JSON serialization (serde), Kmer Content module, three long-read QC modules, and web server support. This remains advantageous for Docker containers (smaller images, faster pulls), CI/CD pipelines, and HPC environments where module systems may not provide a compatible JRE.
 
 ### Output Concordance
 
@@ -203,7 +209,7 @@ We systematically compared module-level PASS/WARN/FAIL calls between RastQC and 
 | Adapter Content | 5/5 | 0 |
 | **Total** | **55/55** | **0** |
 
-All 11 modules produced identical PASS/WARN/FAIL calls across all 5 organisms, achieving **100% concordance** (55/55 module comparisons). This was accomplished by faithfully porting three key algorithms from FastQC:
+All 11 shared modules produced identical PASS/WARN/FAIL calls across all 5 organisms, achieving **100% concordance** (55/55 module comparisons). RastQC additionally runs 4 exclusive modules (Kmer Content, Read Length N50, Quality Stratified Length, Homopolymer Content) that are not present in FastQC output and therefore not included in this concordance analysis. The concordance was accomplished by faithfully porting three key algorithms from FastQC:
 
 1. **Sequence Duplication Levels**: RastQC uses FastQC's exact iterative binomial correction formula for estimating true duplication counts beyond the 100K unique sequence observation window, and uses string-based sequence identity matching rather than hashing.
 
@@ -217,15 +223,15 @@ Numerical values for continuously-valued metrics also showed strong agreement. P
 
 ### Performance Characteristics
 
-RastQC provides consistent performance advantages over FastQC, particularly in three scenarios:
+RastQC provides performance advantages over FastQC in specific scenarios, while running 36% more analysis modules:
 
-1. **Small files and batch processing**: For datasets under 1M reads, RastQC's 1.5--5.6x speedup is dominated by the elimination of 2.66 s JVM startup overhead. Processing 1,000 amplicon panel samples (~50K reads each) would save ~44 minutes from startup elimination alone.
+1. **Small files and batch processing**: For datasets under 500K reads, RastQC achieves 2--4x speedup, dominated by the elimination of 2.55 s JVM startup overhead. Processing 1,000 amplicon panel samples (~50K reads each) would save ~42 minutes from startup elimination alone. The `--exit-code` flag enables automated QC gates in Nextflow and Snakemake pipelines without parsing output files.
 
-2. **Compressed input**: The 32.5x speedup on gzip-compressed FASTQ reflects superior decompression performance of the Rust `flate2` crate. Since most sequencing data is stored compressed, this represents the typical production use case.
+2. **Memory-constrained environments**: RastQC's 59--125 MB footprint enables ~300 concurrent instances on a 32 GB machine, versus ~50 for FastQC. This is critical for shared HPC clusters where memory is a scarce, scheduled resource.
 
-3. **Memory-constrained environments**: RastQC's constant 22--35 MB footprint enables ~1,400 concurrent instances on a 32 GB machine, versus ~50 for FastQC. This is critical for shared HPC clusters where memory is a scarce, scheduled resource.
+3. **Extended analysis**: RastQC runs 15 modules compared to FastQC's 11, including long-read QC metrics (N50, quality-stratified length, homopolymer content) and Kmer Content (enabled by default). The `--multiqc-json` flag provides native JSON output that eliminates parsing overhead in MultiQC integration.
 
-On larger uncompressed datasets (10M reads), the speedup narrows to 1.7x as both tools become I/O-bound and the JVM startup cost is amortized. On *E. coli* uncompressed data, FastQC was marginally faster, suggesting that FastQC's Java implementation is well-optimized for steady-state sequence processing.
+On larger datasets (1M+ reads), the tools achieve comparable throughput. On the *E. coli* dataset (5M reads), FastQC was faster, reflecting the JVM JIT compiler's advantage on long-running workloads. The additional Kmer Content module (7-mer tracking across all positions) adds measurable per-sequence overhead; users analyzing short-read data where kmer analysis is not needed can disable it via a custom limits file for improved speed.
 
 ### Cross-organism Validation
 
@@ -235,33 +241,27 @@ Testing across five organisms with different genome sizes (4.6 Mb to 3.1 Gb), GC
 
 RastQC's output format has been validated for compatibility with MultiQC's FastQC parser. The `fastqc_data.txt` file includes all required fields (Filename, Total Bases, module headers, data columns), and the `summary.txt` file follows the expected three-column format (STATUS, Module Name, Filename). This enables RastQC to serve as a drop-in replacement in existing pipelines that aggregate results via MultiQC.
 
-### Limitations
+### Previously Addressed Limitations
 
-While RastQC achieves full concordance with FastQC and offers substantial performance and deployment advantages, several limitations should be noted:
+The following limitations from earlier versions have been resolved:
 
-1. **No graphical user interface**: RastQC is command-line only. FastQC provides a Swing-based GUI that allows interactive file selection, real-time result viewing, and manual report saving. Users requiring a graphical workflow should continue to use FastQC or pair RastQC with its HTML report viewer.
+1. **Web-based GUI** (`--serve`): RastQC now includes a built-in web server that provides an interactive report browser with file navigation, multi-sample summary views, and direct report viewing. Launched via `rastqc --serve`, it auto-opens a browser to `http://localhost:8080`.
 
-2. **No Oxford Nanopore native format support**: FastQC can read Fast5 files directly via HDF5 libraries. RastQC does not support Fast5 or POD5 formats; Nanopore users must first convert to FASTQ (e.g., via `dorado` or `guppy`) before running RastQC. This is increasingly a non-issue as most Nanopore workflows already output FASTQ or unaligned BAM.
+2. **Oxford Nanopore native format support**: RastQC now reads Fast5 (HDF5) and POD5 (Apache Arrow IPC) files directly, extracting basecalled sequences for QC analysis. This requires building with the `nanopore` feature flag (`cargo build --features nanopore`).
 
-3. **Steady-state throughput on large uncompressed files**: On the largest uncompressed datasets (5M+ reads), FastQC's Java JIT compiler produces competitive throughput once warmed up. On the *E. coli* dataset (5M reads, uncompressed), FastQC was marginally faster (0.9x). This narrowing is expected: both tools are fundamentally I/O-bound at scale, and the JVM's 2.7s startup penalty becomes negligible relative to minutes of processing. RastQC's advantages are most pronounced on compressed input (32.5x speedup) and in batch scenarios where startup cost is multiplied across many files.
+3. **Intra-file parallelism** (`--parallel`): For very large single files (>50 MB), RastQC supports chunked parallel processing. Sequences are buffered in memory, split across threads, processed by independent module instances, and merged via accumulator-state combination. This provides significant speedup on multi-core systems analyzing single large files.
 
-4. **Colorspace reads**: FastQC supports SOLiD colorspace-encoded reads. RastQC does not, as the SOLiD platform has been discontinued and colorspace data is rarely encountered in modern analyses.
+4. **SOLiD colorspace reads**: RastQC now auto-detects and decodes SOLiD colorspace-encoded FASTQ files (di-base encoding with primer base prefix), converting them to basespace for standard QC analysis.
 
-5. **Kmer module disabled by default**: Following FastQC v0.11.6+, the Kmer Content module is disabled by default in the limits configuration. Users who require it must explicitly enable it via a custom limits file (`kmer ignore 0`).
+5. **Kmer module enabled by default**: The Kmer Content module is now enabled by default, matching the full FastQC module complement. Users can disable it via a custom limits file (`kmer ignore 1`).
 
-### Future Directions
+6. **Long-read QC metrics**: Three new modules provide long-read-specific quality assessment: Read Length N50 (with N90, mean, median, min, max), Quality-Stratified Length Distribution (reads binned by Q<10 through Q40+), and Homopolymer Content (run-length analysis for systematic error detection in PacBio and Nanopore data).
 
-Several enhancements are planned to extend RastQC's utility:
+7. **Native MultiQC JSON output** (`--multiqc-json`): Direct JSON output in a structured format eliminates the need for MultiQC to parse `fastqc_data.txt`, enabling richer metadata transfer and faster report aggregation.
 
-1. **Intra-file parallelism**: The current architecture processes each file sequentially. For very large single files (>100M reads), chunked parallel processing with merged statistics could further reduce wall-clock time, particularly on multi-core systems where only one file is being analyzed.
+8. **Workflow manager exit codes** (`--exit-code`): Standardized exit codes (0=all pass, 1=warnings present, 2=failures present) enable automated QC gates in Nextflow, Snakemake, and similar pipeline frameworks without parsing output files.
 
-2. **Long-read QC metrics**: As long-read sequencing (PacBio HiFi, Oxford Nanopore) becomes routine, dedicated QC metrics such as read length N50, quality-stratified length distributions, and homopolymer error rates would complement the existing short-read modules.
-
-3. **Native MultiQC JSON output**: While RastQC's `fastqc_data.txt` is compatible with MultiQC, direct JSON output in MultiQC's native format would eliminate the parsing step and enable richer metadata transfer.
-
-4. **Workflow manager integration**: Standardized non-zero exit codes reflecting overall QC status (e.g., exit 1 if any module fails) would enable automated QC gates in Nextflow, Snakemake, and similar pipeline frameworks without parsing output files.
-
-5. **Streaming from standard input**: Supporting piped FASTQ input (e.g., from `samtools fastq` or `seqtk`) would enable RastQC to operate within Unix pipelines without intermediate file materialization.
+9. **Streaming from standard input** (`--stdin` or `-`): RastQC reads piped FASTQ input from stdin (e.g., `samtools fastq file.bam | rastqc --stdin`), enabling seamless integration into Unix pipelines without intermediate file materialization.
 
 ## Availability
 
@@ -269,8 +269,9 @@ Several enhancements are planned to extend RastQC's utility:
 - **License**: MIT
 - **Language**: Rust (2021 edition)
 - **Installation**: `cargo install --path .` or pre-compiled binaries
-- **Test suite**: 31 tests (20 unit, 11 integration)
+- **Test suite**: 36 tests (25 unit, 11 integration)
 - **System requirements**: Any platform supported by Rust (Linux, macOS, Windows)
+- **Optional features**: `--features nanopore` for Fast5/POD5 support (requires HDF5 system library)
 
 ## References
 

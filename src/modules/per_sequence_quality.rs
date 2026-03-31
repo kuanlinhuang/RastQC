@@ -1,6 +1,7 @@
 use crate::config::FastQCConfig;
 use crate::io::Sequence;
 use super::{PhredEncoding, QCModule, QCResult};
+use std::any::Any;
 use std::collections::HashMap;
 
 pub struct PerSequenceQuality {
@@ -167,5 +168,22 @@ impl QCModule for PerSequenceQuality {
 
         svg.push_str("</svg>");
         svg
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn merge_from(&mut self, other: &mut dyn QCModule) {
+        if let Some(other) = other.as_any_mut().downcast_mut::<Self>() {
+            for (&score, &count) in &other.score_counts {
+                *self.score_counts.entry(score).or_insert(0) += count;
+            }
+            self.lowest_char = self.lowest_char.min(other.lowest_char);
+        }
+    }
+
+    fn supports_merge(&self) -> bool {
+        true
     }
 }

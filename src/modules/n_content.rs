@@ -1,6 +1,7 @@
 use crate::config::FastQCConfig;
 use crate::io::Sequence;
 use super::{BaseGroup, QCModule, QCResult};
+use std::any::Any;
 
 pub struct NContent {
     n_counts: Vec<u64>,
@@ -154,5 +155,23 @@ impl QCModule for NContent {
 
         svg.push_str("</svg>");
         svg
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn merge_from(&mut self, other: &mut dyn QCModule) {
+        if let Some(other) = other.as_any_mut().downcast_mut::<Self>() {
+            self.ensure_length(other.n_counts.len());
+            for i in 0..other.n_counts.len() {
+                self.n_counts[i] += other.n_counts[i];
+                self.total_counts[i] += other.total_counts[i];
+            }
+        }
+    }
+
+    fn supports_merge(&self) -> bool {
+        true
     }
 }

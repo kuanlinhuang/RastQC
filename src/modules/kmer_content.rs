@@ -1,6 +1,7 @@
 use crate::config::FastQCConfig;
 use crate::io::Sequence;
 use super::{BaseGroup, QCModule, QCResult};
+use std::any::Any;
 use std::collections::HashMap;
 
 const MAX_SEQ_LENGTH: usize = 500;
@@ -244,5 +245,43 @@ impl QCModule for KmerContent {
 
     fn svg_chart(&self) -> String {
         String::new()
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn merge_from(&mut self, other: &mut dyn QCModule) {
+        if let Some(other) = other.as_any_mut().downcast_mut::<Self>() {
+            self.total_sequences += other.total_sequences;
+            if other.max_length > self.max_length {
+                self.max_length = other.max_length;
+            }
+            // Merge total_kmer_counts
+            while self.total_kmer_counts.len() < other.total_kmer_counts.len() {
+                self.total_kmer_counts.push(0);
+            }
+            for (i, &val) in other.total_kmer_counts.iter().enumerate() {
+                self.total_kmer_counts[i] += val;
+            }
+            // Merge per-kmer counts and positions
+            for (kmer_str, other_info) in other.kmers.drain() {
+                let entry = self.kmers.entry(kmer_str).or_insert_with(|| KmerInfo {
+                    count: 0,
+                    positions: Vec::new(),
+                });
+                entry.count += other_info.count;
+                while entry.positions.len() < other_info.positions.len() {
+                    entry.positions.push(0);
+                }
+                for (i, &val) in other_info.positions.iter().enumerate() {
+                    entry.positions[i] += val;
+                }
+            }
+        }
+    }
+
+    fn supports_merge(&self) -> bool {
+        true
     }
 }

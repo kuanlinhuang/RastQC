@@ -1,6 +1,7 @@
 use crate::config::FastQCConfig;
 use crate::io::Sequence;
 use super::{QCModule, QCResult};
+use std::any::Any;
 use std::collections::HashMap;
 
 const OBSERVATION_CUTOFF: usize = 100_000;
@@ -279,5 +280,25 @@ impl QCModule for DuplicationLevel {
 
         svg.push_str("</svg>");
         svg
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn merge_from(&mut self, other: &mut dyn QCModule) {
+        if let Some(other) = other.as_any_mut().downcast_mut::<Self>() {
+            for (seq, count) in other.sequences.drain() {
+                *self.sequences.entry(seq).or_insert(0) += count;
+            }
+            self.total_sequences += other.total_sequences;
+            self.count_at_unique_limit += other.count_at_unique_limit;
+            self.unique_count = self.sequences.len();
+            self.frozen = self.unique_count >= OBSERVATION_CUTOFF;
+        }
+    }
+
+    fn supports_merge(&self) -> bool {
+        true
     }
 }

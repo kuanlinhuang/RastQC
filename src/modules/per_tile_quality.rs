@@ -1,6 +1,7 @@
 use crate::config::FastQCConfig;
 use crate::io::Sequence;
 use super::{BaseGroup, QCModule, QCResult};
+use std::any::Any;
 use std::collections::HashMap;
 
 pub struct PerTileQuality {
@@ -272,5 +273,31 @@ impl QCModule for PerTileQuality {
 
         svg.push_str("</svg>");
         svg
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn merge_from(&mut self, other: &mut dyn QCModule) {
+        if let Some(other) = other.as_any_mut().downcast_mut::<Self>() {
+            self.total_sequences += other.total_sequences;
+            self.max_length = self.max_length.max(other.max_length);
+            if other.gave_up { self.gave_up = true; }
+            for (tile_id, other_positions) in &other.tile_data {
+                let entry = self.tile_data.entry(*tile_id).or_insert_with(Vec::new);
+                while entry.len() < other_positions.len() {
+                    entry.push((0.0, 0));
+                }
+                for (i, (sum, count)) in other_positions.iter().enumerate() {
+                    entry[i].0 += sum;
+                    entry[i].1 += count;
+                }
+            }
+        }
+    }
+
+    fn supports_merge(&self) -> bool {
+        true
     }
 }

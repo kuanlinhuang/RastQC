@@ -1,3 +1,4 @@
+use std::any::Any;
 use crate::config::FastQCConfig;
 use crate::io::Sequence;
 use super::{PhredEncoding, QCModule, QCResult};
@@ -161,6 +162,30 @@ impl QCModule for BasicStats {
 
     fn svg_chart(&self) -> String {
         String::new()
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn merge_from(&mut self, other: &mut dyn QCModule) {
+        if let Some(other) = other.as_any_mut().downcast_mut::<Self>() {
+            self.total_sequences += other.total_sequences;
+            self.filtered_sequences += other.filtered_sequences;
+            self.min_length = self.min_length.min(other.min_length);
+            self.max_length = self.max_length.max(other.max_length);
+            self.total_bases += other.total_bases;
+            self.a_count += other.a_count;
+            self.t_count += other.t_count;
+            self.g_count += other.g_count;
+            self.c_count += other.c_count;
+            self.n_count += other.n_count;
+            self.lowest_char = self.lowest_char.min(other.lowest_char);
+        }
+    }
+
+    fn supports_merge(&self) -> bool {
+        true
     }
 }
 

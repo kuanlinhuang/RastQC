@@ -3,11 +3,11 @@ set -e
 
 export PATH="/usr/local/opt/openjdk@11/bin:$HOME/.cargo/bin:$PATH"
 
-RASTQC="/Users/huangk06/Projects/FastQC2/target/release/rastqc"
-FASTQC_DIR="/Users/huangk06/Projects/FastQC2/FastQC"
+RASTQC="/Users/huangk06/Projects/RastQC/target/release/rastqc"
+FASTQC_DIR="/Users/huangk06/Projects/RastQC/FastQC"
 FASTQC_CP="$FASTQC_DIR/bin:$FASTQC_DIR/sam-1.103.jar:$FASTQC_DIR/jbzip2-0.9.jar:$FASTQC_DIR/htsjdk.jar:$FASTQC_DIR/cisd-jhdf5.jar"
-DATADIR="/Users/huangk06/Projects/FastQC2/paper/data"
-OUTDIR="/Users/huangk06/Projects/FastQC2/paper/benchmarks"
+DATADIR="/Users/huangk06/Projects/RastQC/paper/data"
+OUTDIR="/Users/huangk06/Projects/RastQC/paper/benchmarks"
 
 mkdir -p "$OUTDIR/rastqc_out" "$OUTDIR/fastqc_out"
 

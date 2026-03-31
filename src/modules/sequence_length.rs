@@ -1,6 +1,7 @@
 use crate::config::FastQCConfig;
 use crate::io::Sequence;
 use super::{QCModule, QCResult};
+use std::any::Any;
 use std::collections::HashMap;
 
 pub struct SequenceLengthDist {
@@ -197,5 +198,30 @@ impl QCModule for SequenceLengthDist {
 
         svg.push_str("</svg>");
         svg
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn merge_from(&mut self, other: &mut dyn QCModule) {
+        if let Some(other) = other.as_any_mut().downcast_mut::<Self>() {
+            for (&len, &count) in &other.length_counts {
+                *self.length_counts.entry(len).or_insert(0) += count;
+            }
+            if other.min_length < self.min_length {
+                self.min_length = other.min_length;
+            }
+            if other.max_length > self.max_length {
+                self.max_length = other.max_length;
+            }
+            if other.has_zero_length {
+                self.has_zero_length = true;
+            }
+        }
+    }
+
+    fn supports_merge(&self) -> bool {
+        true
     }
 }

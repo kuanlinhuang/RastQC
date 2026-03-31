@@ -1,12 +1,15 @@
 mod config;
+mod gui;
 mod io;
 mod modules;
+mod parallel;
 mod report;
 
 use anyhow::Result;
 use clap::Parser;
 use rayon::prelude::*;
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
@@ -15,8 +18,8 @@ use config::FastQCConfig;
 use io::SequenceReader;
 use modules::{ModuleFactory, QCResult};
 use report::{
-    generate_html_report, generate_summary_html, generate_summary_tsv, generate_summary_txt,
-    generate_text_data, write_zip_archive,
+    generate_html_report, generate_multiqc_json, generate_summary_html, generate_summary_tsv,
+    generate_summary_txt, generate_text_data, write_zip_archive,
 };
 
 /// Per-file result summary used for the multi-file overview.
@@ -31,9 +34,12 @@ pub struct FileSummary {
 #[command(name = "rastqc", version = "0.1.0")]
 #[command(about = "RastQC - A quality control tool for high throughput sequence data")]
 struct Cli {
-    /// Input files (FASTQ, BAM, SAM)
-    #[arg(required = true)]
+    /// Input files (FASTQ, BAM, SAM). Use "-" to read FASTQ from stdin.
     files: Vec<PathBuf>,
+
+    /// Read FASTQ from stdin (equivalent to passing "-" as input)
+    #[arg(long)]
+    stdin: bool,
 
     /// Output directory
     #[arg(short, long)]
@@ -82,6 +88,28 @@ struct Cli {
     /// Length to truncate sequences for duplication detection
     #[arg(long, default_value_t = 50)]
     dup_length: usize,
+
+    /// Output native MultiQC JSON (multiqc_fastqc.json) alongside standard reports
+    #[arg(long)]
+    multiqc_json: bool,
+
+    /// Return QC-aware exit codes: 0=all pass, 1=warnings, 2=failures.
+    /// Useful for automated QC gates in Nextflow, Snakemake, etc.
+    #[arg(long)]
+    exit_code: bool,
+
+    /// Start a local web server to browse reports (default port: 8080)
+    #[arg(long)]
+    serve: bool,
+
+    /// Port for the web server (used with --serve)
+    #[arg(long, default_value_t = 8080)]
+    port: u16,
+
+    /// Enable intra-file parallelism for large files (>50MB).
+    /// Buffers sequences in memory for chunked parallel processing.
+    #[arg(long)]
+    parallel: bool,
 }
 
 fn num_cpus() -> usize {
@@ -90,8 +118,27 @@ fn num_cpus() -> usize {
         .unwrap_or(1)
 }
 
-fn main() -> Result<()> {
-    let cli = Cli::parse();
+fn main() -> ExitCode {
+    match run() {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("Error: {:#}", e);
+            ExitCode::from(3)
+        }
+    }
+}
+
+fn run() -> Result<ExitCode> {
+    let mut cli = Cli::parse();
+
+    // Handle --stdin flag: add "-" to file list
+    if cli.stdin {
+        cli.files.push(PathBuf::from("-"));
+    }
+
+    if cli.files.is_empty() {
+        anyhow::bail!("No input files specified. Pass file paths or use --stdin to read from standard input.");
+    }
 
     let config = FastQCConfig::new(
         cli.contaminants.as_deref(),
@@ -168,7 +215,29 @@ fn main() -> Result<()> {
         }
     }
 
-    Ok(())
+    // Start web server if requested
+    if cli.serve {
+        gui::start_server(&outdir, cli.port)?;
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    // Determine exit code based on QC results
+    if cli.exit_code {
+        let has_fail = summaries
+            .iter()
+            .any(|s| s.module_results.iter().any(|(_, r)| *r == QCResult::Fail));
+        let has_warn = summaries
+            .iter()
+            .any(|s| s.module_results.iter().any(|(_, r)| *r == QCResult::Warn));
+        if has_fail {
+            return Ok(ExitCode::from(2));
+        }
+        if has_warn {
+            return Ok(ExitCode::from(1));
+        }
+    }
+
+    Ok(ExitCode::SUCCESS)
 }
 
 fn process_file(
@@ -177,35 +246,49 @@ fn process_file(
     config: &FastQCConfig,
     cli: &Cli,
 ) -> Result<FileSummary> {
-    let mut reader = SequenceReader::open(file)?;
-    let mut qc_modules = ModuleFactory::create_modules(config);
+    let is_stdin = file.as_os_str() == "-";
 
-    let mut count: u64 = 0;
-    while let Some(seq) = reader.next_sequence()? {
-        for module in &mut qc_modules {
-            module.process_sequence(&seq);
+    // Choose between parallel and sequential processing
+    let (qc_modules, count) = if !is_stdin && cli.parallel && parallel::should_use_parallel(file) {
+        parallel::process_file_parallel(file, config)?
+    } else {
+        let mut reader = if is_stdin {
+            SequenceReader::from_stdin()
+        } else {
+            SequenceReader::open(file)?
+        };
+        let mut qc_modules = ModuleFactory::create_modules(config);
+
+        let mut count: u64 = 0;
+        while let Some(seq) = reader.next_sequence()? {
+            for module in &mut qc_modules {
+                module.process_sequence(&seq);
+            }
+            count += 1;
         }
-        count += 1;
-    }
 
-    for module in &mut qc_modules {
-        module.calculate_results(config);
-    }
+        for module in &mut qc_modules {
+            module.calculate_results(config);
+        }
+        (qc_modules, count)
+    };
 
     // Determine output base name
-    let stem = file
-        .file_name()
-        .unwrap()
-        .to_string_lossy()
+    let filename = if is_stdin {
+        "stdin.fastq".to_string()
+    } else {
+        file.file_name().unwrap().to_string_lossy().to_string()
+    };
+    let stem = filename
         .trim_end_matches(".gz")
         .trim_end_matches(".bz2")
         .trim_end_matches(".fastq")
         .trim_end_matches(".fq")
         .trim_end_matches(".bam")
         .trim_end_matches(".sam")
+        .trim_end_matches(".fast5")
+        .trim_end_matches(".pod5")
         .to_string();
-
-    let filename = file.file_name().unwrap().to_string_lossy().to_string();
 
     // Collect module results for summary
     let module_results: Vec<(String, QCResult)> = qc_modules
@@ -217,6 +300,13 @@ fn process_file(
     let html = generate_html_report(&filename, &qc_modules);
     let text = generate_text_data(&filename, &qc_modules);
     let summary_txt = generate_summary_txt(&filename, &qc_modules);
+
+    // Generate MultiQC JSON if requested
+    if cli.multiqc_json {
+        let json = generate_multiqc_json(&filename, &qc_modules);
+        let json_path = outdir.join(format!("{}_multiqc.json", stem));
+        std::fs::write(&json_path, &json)?;
+    }
 
     let report_path;
     if cli.nozip {

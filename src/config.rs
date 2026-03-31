@@ -266,7 +266,7 @@ mod tests {
     #[test]
     fn test_is_ignored() {
         let config = FastQCConfig::new(None, None, None, 7, false, 50).unwrap();
-        assert!(config.is_ignored("kmer")); // kmer ignored by default
+        assert!(!config.is_ignored("kmer")); // kmer enabled by default
         assert!(!config.is_ignored("quality_base"));
     }
 }
@@ -274,7 +274,7 @@ mod tests {
 fn default_limits() -> HashMap<String, ModuleLimits> {
     let content = "\
 duplication\tignore\t0
-kmer\tignore\t1
+kmer\tignore\t0
 n_content\tignore\t0
 overrepresented\tignore\t0
 quality_base\tignore\t0
@@ -307,7 +307,16 @@ tile\terror\t10
 sequence_length\twarn\t1
 sequence_length\terror\t1
 adapter\twarn\t5
-adapter\terror\t10";
+adapter\terror\t10
+read_length_n50\tignore\t0
+read_length_n50\twarn\t0
+read_length_n50\terror\t0
+quality_stratified_length\tignore\t0
+quality_stratified_length\twarn\t0
+quality_stratified_length\terror\t0
+homopolymer\tignore\t0
+homopolymer\twarn\t5
+homopolymer\terror\t10";
 
     parse_limits(content)
 }

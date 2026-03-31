@@ -1,6 +1,7 @@
 use crate::config::FastQCConfig;
 use crate::io::Sequence;
 use super::{QCModule, QCResult};
+use std::any::Any;
 use std::collections::HashMap;
 
 /// GCModel: for a given read length, precomputes the percentage bin weights
@@ -341,5 +342,22 @@ impl QCModule for PerSequenceGC {
 
         svg.push_str("</svg>");
         svg
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn merge_from(&mut self, other: &mut dyn QCModule) {
+        if let Some(other) = other.as_any_mut().downcast_mut::<Self>() {
+            for i in 0..101 {
+                self.gc_distribution[i] += other.gc_distribution[i];
+            }
+            self.total_count += other.total_count;
+        }
+    }
+
+    fn supports_merge(&self) -> bool {
+        true
     }
 }
