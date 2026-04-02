@@ -1,5 +1,6 @@
 mod fastq;
 mod bam;
+mod fasta;
 pub mod colorspace;
 mod fast5;
 mod pod5;
@@ -43,12 +44,13 @@ impl Sequence {
     }
 }
 
-/// Unified reader for FASTQ, BAM, SAM, Fast5, POD5 files
+/// Unified reader for FASTQ, BAM, SAM, Fast5, POD5, FASTA files
 pub enum SequenceReader {
     Fastq(fastq::FastqReader),
     Bam(bam::BamReader),
     Fast5(fast5::Fast5Reader),
     Pod5(pod5::Pod5Reader),
+    Fasta(fasta::FastaReader),
 }
 
 impl SequenceReader {
@@ -75,14 +77,25 @@ impl SequenceReader {
             || name.ends_with(".fq.bz2")
         {
             Ok(SequenceReader::Fastq(fastq::FastqReader::open(path)?))
+        } else if name.ends_with(".fasta")
+            || name.ends_with(".fa")
+            || name.ends_with(".fasta.gz")
+            || name.ends_with(".fa.gz")
+            || name.ends_with(".fasta.bz2")
+            || name.ends_with(".fa.bz2")
+        {
+            Ok(SequenceReader::Fasta(fasta::FastaReader::open(path)?))
         } else {
             // Try FASTQ as default
             match fastq::FastqReader::open(path) {
                 Ok(r) => Ok(SequenceReader::Fastq(r)),
-                Err(_) => bail!(
-                    "Unrecognized file format: {}. Supported: .fastq, .fq, .bam, .sam (with optional .gz/.bz2 compression)",
-                    path.display()
-                ),
+                Err(_) => match fasta::FastaReader::open(path) {
+                    Ok(r) => Ok(SequenceReader::Fasta(r)),
+                    Err(_) => bail!(
+                        "Unrecognized file format: {}. Supported: .fastq, .fq, .fasta, .fa, .bam, .sam, .fast5, .pod5 (with optional .gz/.bz2 compression)",
+                        path.display()
+                    ),
+                },
             }
         }
     }
@@ -98,6 +111,7 @@ impl SequenceReader {
             SequenceReader::Bam(r) => r.next_sequence(),
             SequenceReader::Fast5(r) => r.next_sequence(),
             SequenceReader::Pod5(r) => r.next_sequence(),
+            SequenceReader::Fasta(r) => r.next_sequence(),
         }
     }
 }
