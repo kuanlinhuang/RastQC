@@ -106,10 +106,9 @@ struct Cli {
     #[arg(long, default_value_t = 8080)]
     port: u16,
 
-    /// Enable intra-file parallelism for large files (>50MB).
-    /// Buffers sequences in memory for chunked parallel processing.
+    /// Disable intra-file parallelism (streaming parallel is on by default for files >50MB).
     #[arg(long)]
-    parallel: bool,
+    no_parallel: bool,
 }
 
 fn num_cpus() -> usize {
@@ -248,9 +247,9 @@ fn process_file(
 ) -> Result<FileSummary> {
     let is_stdin = file.as_os_str() == "-";
 
-    // Choose between parallel and sequential processing
-    let (qc_modules, count) = if !is_stdin && cli.parallel && parallel::should_use_parallel(file) {
-        parallel::process_file_parallel(file, config)?
+    // Choose between streaming parallel and sequential processing
+    let (qc_modules, count) = if !is_stdin && !cli.no_parallel && parallel::should_use_parallel(file) {
+        parallel::process_file_parallel(file, config, cli.threads)?
     } else {
         let mut reader = if is_stdin {
             SequenceReader::from_stdin()

@@ -31,3 +31,7 @@ Thumbs.db
 /paper/benchmarks/real_genomes/
 /paper/*.docx
 
+# Benchmark data (large FASTQ files) and outputs
+/benchmark/data/
+/benchmark/results/
+

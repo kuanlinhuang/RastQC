@@ -13,13 +13,15 @@ const BIN_LABELS: &[&str] = &[
 ];
 
 pub struct DuplicationLevel {
-    /// Sequence string -> count (same tracking as OverRepresentedSeqs, matching FastQC)
-    sequences: HashMap<String, u64>,
+    /// Uppercase sequence bytes -> count (avoids String allocation per read)
+    sequences: HashMap<Vec<u8>, u64>,
     total_sequences: u64,
     count_at_unique_limit: u64,
     dup_length: usize,
     frozen: bool,
     unique_count: usize,
+    /// Reusable buffer for uppercase conversion
+    upper_buf: Vec<u8>,
     // Results
     total_percentages: [f64; 16],
     percent_different: f64,
@@ -35,6 +37,7 @@ impl DuplicationLevel {
             dup_length,
             frozen: false,
             unique_count: 0,
+            upper_buf: Vec::with_capacity(dup_length),
             total_percentages: [0.0; 16],
             percent_different: 100.0,
             qc_result: QCResult::NotRun,
@@ -115,17 +118,18 @@ impl QCModule for DuplicationLevel {
     fn process_sequence(&mut self, seq: &Sequence) {
         self.total_sequences += 1;
 
-        // Truncate for duplication detection (matching FastQC/OverRepresentedSeqs)
+        // Truncate and uppercase into reusable buffer (zero allocation in steady state)
         let end = seq.sequence.len().min(self.dup_length);
-        let trunc = String::from_utf8_lossy(&seq.sequence[..end]).to_uppercase();
+        self.upper_buf.clear();
+        self.upper_buf.extend(seq.sequence[..end].iter().map(|b| b.to_ascii_uppercase()));
 
         if self.frozen {
             // Only increment existing entries after freeze
-            if let Some(count) = self.sequences.get_mut(&trunc) {
+            if let Some(count) = self.sequences.get_mut(&self.upper_buf) {
                 *count += 1;
             }
         } else {
-            let entry = self.sequences.entry(trunc).or_insert(0);
+            let entry = self.sequences.entry(self.upper_buf.clone()).or_insert(0);
             *entry += 1;
             if *entry == 1 {
                 self.unique_count += 1;

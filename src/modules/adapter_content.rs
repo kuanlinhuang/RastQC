@@ -75,15 +75,12 @@ impl QCModule for AdapterContent {
                 continue;
             }
 
-            // Search for adapter sequence
-            let seq_upper: Vec<u8> = seq.sequence.iter().map(|&b| b.to_ascii_uppercase()).collect();
-
-            // Find earliest match position
+            // Case-insensitive search without allocating an uppercase copy
             let mut found_pos = None;
             for start in 0..=(seq_len - adapter_len) {
                 let mut matches = true;
                 for j in 0..adapter_len {
-                    if seq_upper[start + j] != adapter.sequence[j] {
+                    if seq.sequence[start + j].to_ascii_uppercase() != adapter.sequence[j] {
                         matches = false;
                         break;
                     }

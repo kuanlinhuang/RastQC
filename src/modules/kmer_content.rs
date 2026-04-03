@@ -14,10 +14,12 @@ struct KmerInfo {
 
 pub struct KmerContent {
     kmer_size: usize,
-    kmers: HashMap<String, KmerInfo>,
+    kmers: HashMap<Vec<u8>, KmerInfo>,
     total_kmer_counts: Vec<u64>,
     total_sequences: u64,
     max_length: usize,
+    /// Reusable buffer for uppercase sequence
+    upper_buf: Vec<u8>,
     // Results
     groups: Vec<BaseGroup>,
     result_entries: Vec<KmerResult>,
@@ -43,6 +45,7 @@ impl KmerContent {
             total_kmer_counts: Vec::new(),
             total_sequences: 0,
             max_length: 0,
+            upper_buf: Vec::with_capacity(MAX_SEQ_LENGTH),
             groups: Vec::new(),
             result_entries: Vec::new(),
             min_pvalue_log10: 0.0,
@@ -81,13 +84,12 @@ impl QCModule for KmerContent {
             self.total_kmer_counts.push(0);
         }
 
-        let seq_upper: Vec<u8> = seq.sequence[..len]
-            .iter()
-            .map(|b| b.to_ascii_uppercase())
-            .collect();
+        // Reuse uppercase buffer (zero allocation in steady state)
+        self.upper_buf.clear();
+        self.upper_buf.extend(seq.sequence[..len].iter().map(|b| b.to_ascii_uppercase()));
 
         for i in 0..=(len - self.kmer_size) {
-            let kmer = &seq_upper[i..i + self.kmer_size];
+            let kmer = &self.upper_buf[i..i + self.kmer_size];
 
             // Skip kmers with N
             if kmer.contains(&b'N') {
@@ -96,8 +98,8 @@ impl QCModule for KmerContent {
 
             self.total_kmer_counts[i] += 1;
 
-            let kmer_str = String::from_utf8_lossy(kmer).to_string();
-            let entry = self.kmers.entry(kmer_str).or_insert_with(|| KmerInfo {
+            // Use Vec<u8> key directly — avoids String allocation per kmer
+            let entry = self.kmers.entry(kmer.to_vec()).or_insert_with(|| KmerInfo {
                 count: 0,
                 positions: Vec::new(),
             });
@@ -188,7 +190,7 @@ impl QCModule for KmerContent {
             // Only keep significant & enriched kmers
             if pvalue_log10 > 1.0 && max_obs_exp > 5.0 {
                 results.push(KmerResult {
-                    sequence: kmer_seq.clone(),
+                    sequence: String::from_utf8_lossy(kmer_seq).to_string(),
                     count: info.count,
                     obs_exp_overall,
                     obs_exp_max: max_obs_exp,

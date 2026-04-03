@@ -7,11 +7,13 @@ use std::collections::HashMap;
 const OBSERVATION_CUTOFF: usize = 100_000;
 
 pub struct OverrepresentedSeqs {
-    sequences: HashMap<String, u64>,
+    sequences: HashMap<Vec<u8>, u64>,
     total_count: u64,
     dup_length: usize,
     reached_limit: bool,
     count_at_limit: u64,
+    /// Reusable buffer for uppercase conversion
+    upper_buf: Vec<u8>,
     // Results
     overrep_entries: Vec<OverrepEntry>,
     qc_result: QCResult,
@@ -32,13 +34,14 @@ impl OverrepresentedSeqs {
             dup_length,
             reached_limit: false,
             count_at_limit: 0,
+            upper_buf: Vec::with_capacity(dup_length),
             overrep_entries: Vec::new(),
             qc_result: QCResult::NotRun,
         }
     }
 
     /// Expose sequence counts for the Duplication module (mirrors FastQC architecture)
-    pub fn sequence_counts(&self) -> &HashMap<String, u64> {
+    pub fn sequence_counts(&self) -> &HashMap<Vec<u8>, u64> {
         &self.sequences
     }
 
@@ -50,8 +53,8 @@ impl OverrepresentedSeqs {
         self.total_count
     }
 
-    fn find_contaminant(seq: &str, config: &FastQCConfig) -> String {
-        let seq_upper = seq.to_uppercase();
+    fn find_contaminant(seq: &[u8], config: &FastQCConfig) -> String {
+        let seq_upper = String::from_utf8_lossy(seq).to_uppercase();
         let mut best_name = String::from("No Hit");
         let mut best_len = 0usize;
 
@@ -153,15 +156,17 @@ impl QCModule for OverrepresentedSeqs {
     fn process_sequence(&mut self, seq: &Sequence) {
         self.total_count += 1;
 
+        // Truncate and uppercase into reusable buffer (zero allocation in steady state)
         let end = seq.sequence.len().min(self.dup_length);
-        let trunc = String::from_utf8_lossy(&seq.sequence[..end]).to_uppercase();
+        self.upper_buf.clear();
+        self.upper_buf.extend(seq.sequence[..end].iter().map(|b| b.to_ascii_uppercase()));
 
         if self.reached_limit {
-            if let Some(count) = self.sequences.get_mut(&trunc) {
+            if let Some(count) = self.sequences.get_mut(&self.upper_buf) {
                 *count += 1;
             }
         } else {
-            *self.sequences.entry(trunc).or_insert(0) += 1;
+            *self.sequences.entry(self.upper_buf.clone()).or_insert(0) += 1;
 
             if self.sequences.len() >= OBSERVATION_CUTOFF {
                 self.reached_limit = true;
@@ -189,7 +194,7 @@ impl QCModule for OverrepresentedSeqs {
         let effective_total = self.total_count as f64;
 
         // Find sequences above warning threshold
-        let mut entries: Vec<(&String, &u64)> = self
+        let mut entries: Vec<(&Vec<u8>, &u64)> = self
             .sequences
             .iter()
             .filter(|(_, &count)| {
@@ -213,7 +218,7 @@ impl QCModule for OverrepresentedSeqs {
             }
 
             self.overrep_entries.push(OverrepEntry {
-                sequence: seq.clone(),
+                sequence: String::from_utf8_lossy(seq).to_string(),
                 count,
                 percentage,
                 possible_source: source,

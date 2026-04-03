@@ -5,7 +5,7 @@ A fast quality control tool for high-throughput sequencing data, written in Rust
 ## Features
 
 - **15 QC modules**: all 12 FastQC modules + 3 long-read QC modules
-- **Fast**: multi-threaded parallel file processing; optional intra-file parallelism for large files
+- **Fast**: streaming parallel pipeline — 2-3x faster than FastQC on real sequencing data
 - **Portable**: single 2.1 MB static binary, no Java runtime needed
 - **Compatible output**: HTML reports, tab-separated data files, ZIP archives, native MultiQC JSON
 - **Multi-file summary**: overview dashboard when processing many files
@@ -92,7 +92,7 @@ Options:
       --exit-code               Return QC-aware exit codes: 0=pass, 1=warn, 2=fail
       --serve                   Start web server to browse reports
       --port <N>                Web server port [default: 8080]
-      --parallel                Intra-file parallelism for large files (>50MB)
+      --no-parallel             Disable streaming intra-file parallelism (on by default for >50MB files)
   -q, --quiet                   Suppress progress output
       --dup-length <N>          Truncation length for duplication detection [default: 50]
   -h, --help                    Print help
@@ -107,7 +107,7 @@ rastqc/
 │   ├── main.rs              # CLI entry point, file dispatch, exit codes
 │   ├── config.rs            # Adapters, contaminants, limits, thresholds
 │   ├── gui.rs               # Built-in HTTP server for report browsing
-│   ├── parallel.rs          # Intra-file chunked parallel processing + merge
+│   ├── parallel.rs          # Streaming parallel pipeline (reader → channel → workers → merge)
 │   ├── io/
 │   │   ├── mod.rs           # SequenceReader enum (unified format dispatch)
 │   │   ├── fastq.rs         # FASTQ/gz/bz2 streaming reader + stdin
@@ -139,6 +139,8 @@ rastqc/
 ```
 
 **Data flow**: Files → `SequenceReader` → streaming `Sequence` records → each record passed to all `QCModule` instances → `calculate_results()` → report generation (HTML/text/JSON/ZIP).
+
+**Streaming parallel pipeline** (default for files >50MB): A dedicated reader thread streams batches of sequences through a bounded crossbeam channel to N worker threads, each with independent module instances. After the file is fully read, worker states are merged via `merge_from()`. This avoids buffering the entire file in memory while achieving near-linear speedup with thread count.
 
 All 15 modules implement the `QCModule` trait with `process_sequence()`, `calculate_results()`, `merge_from()` (for parallel chunk merging), and output methods. Modules are created by `ModuleFactory` based on the limits configuration.
 
@@ -268,14 +270,27 @@ RastQC produces output compatible with tools that consume FastQC results:
 
 ## Performance
 
+Benchmarked on real human whole-exome sequencing data (ENA/SRA), 4 threads, macOS ARM64:
+
+| File | Size | FastQC 0.12.1 | RastQC | Speedup |
+|------|------|---------------|--------|---------|
+| DRR609229 R1 | 22 MB | 3.5s | **2.0s** | 1.7x |
+| DRR609229 R2 | 23 MB | 3.4s | **2.0s** | 1.7x |
+| ERR5897746 R1 | 320 MB | 14.5s | **5.2s** | 2.8x |
+| ERR5897746 R2 | 327 MB | 15.5s | **5.1s** | 3.0x |
+| DRR013000 R1 | 1.4 GB | 56.7s | **19.7s** | 2.9x |
+| All 5 files | 2.1 GB | 60.8s | **26.6s** | 2.3x |
+
 | Metric | RastQC | FastQC (Java) |
 |--------|--------|---------------|
 | Binary size | 2.1 MB | ~215 MB (with JRE) |
 | Startup time | <5 ms | ~2.5 s JVM warmup |
-| Memory (100K reads) | 70 MB | 408 MB |
-| Memory (real genomes) | 59--125 MB | 551--638 MB |
-| Threading | per-file + intra-file parallel | per-file parallel |
+| Peak memory (small files) | 54-57 MB | 420-427 MB |
+| Peak memory (1.4 GB file) | 740 MB | 421 MB |
+| Threading | streaming intra-file + multi-file parallel | per-file parallel |
 | Modules | 15 | 11 |
+
+RastQC's streaming parallel pipeline automatically activates for files >50MB, using a bounded reader-worker architecture that scales with thread count without buffering the entire file in memory.
 
 ---
 

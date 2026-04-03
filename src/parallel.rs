@@ -2,84 +2,112 @@ use crate::config::FastQCConfig;
 use crate::io::{Sequence, SequenceReader};
 use crate::modules::{merge_module_sets, ModuleFactory, QCModule};
 use anyhow::Result;
-use rayon::prelude::*;
+use crossbeam::channel;
 use std::path::Path;
+use std::thread;
 
-const CHUNK_SIZE: usize = 100_000;
-const MIN_SEQS_FOR_PARALLEL: usize = 200_000;
+/// Batch size: number of sequences per chunk sent through the channel.
+/// Tuned for cache-friendly processing without excessive memory use.
+const BATCH_SIZE: usize = 16_384;
 
-/// Process a file using intra-file parallelism.
+/// Channel capacity: number of batches buffered in the channel.
+/// Bounded to limit memory — at 16K seqs/batch this is ~2-3 batches ahead.
+const CHANNEL_CAPACITY: usize = 4;
+
+/// Process a file using streaming parallelism.
 ///
-/// Reads all sequences into memory, splits into chunks, processes each
-/// chunk with independent module instances in parallel, then merges
-/// results by combining module accumulator states.
+/// Architecture:
+///   Reader thread → bounded channel → N worker threads (each with own modules)
+///   → merge all worker module states → final result
 ///
-/// This gives real speedup for large files by distributing the
-/// CPU-intensive per-sequence processing across multiple threads.
+/// Unlike the old approach, this never buffers the entire file in memory.
+/// Memory usage is bounded: O(BATCH_SIZE × CHANNEL_CAPACITY × avg_read_size).
 pub fn process_file_parallel(
     path: &Path,
     config: &FastQCConfig,
+    num_threads: usize,
 ) -> Result<(Vec<Box<dyn QCModule>>, u64)> {
-    let mut reader = SequenceReader::open(path)?;
+    let num_workers = num_threads.max(1);
 
-    // Phase 1: Read all sequences into memory
-    let mut all_sequences: Vec<Sequence> = Vec::with_capacity(CHUNK_SIZE);
-    while let Some(seq) = reader.next_sequence()? {
-        all_sequences.push(seq);
-    }
+    // Bounded channel: reader sends batches, workers consume them
+    let (sender, receiver) = channel::bounded::<Vec<Sequence>>(CHANNEL_CAPACITY);
 
-    let total_count = all_sequences.len() as u64;
+    // Spawn reader thread
+    let path_owned = path.to_path_buf();
+    let reader_handle = thread::spawn(move || -> Result<()> {
+        let mut reader = SequenceReader::open(&path_owned)?;
+        let mut batch = Vec::with_capacity(BATCH_SIZE);
 
-    if total_count == 0 {
-        let modules = ModuleFactory::create_modules(config);
-        return Ok((modules, 0));
-    }
-
-    // If the file is small, process sequentially (no overhead from chunking)
-    if all_sequences.len() < MIN_SEQS_FOR_PARALLEL {
-        let mut modules = ModuleFactory::create_modules(config);
-        for seq in &all_sequences {
-            for module in modules.iter_mut() {
-                module.process_sequence(seq);
+        while let Some(seq) = reader.next_sequence()? {
+            batch.push(seq);
+            if batch.len() >= BATCH_SIZE {
+                // If all receivers dropped, stop reading
+                if sender.send(batch).is_err() {
+                    return Ok(());
+                }
+                batch = Vec::with_capacity(BATCH_SIZE);
             }
         }
-        for module in modules.iter_mut() {
-            module.calculate_results(config);
+        // Send remaining sequences
+        if !batch.is_empty() {
+            let _ = sender.send(batch);
         }
-        return Ok((modules, total_count));
-    }
+        // Channel closes when sender is dropped
+        Ok(())
+    });
 
-    // Phase 2: Process chunks in parallel with independent module sets
-    let num_threads = rayon::current_num_threads();
-    let chunk_size = (all_sequences.len() + num_threads - 1) / num_threads;
+    // Spawn worker threads, each with independent module instances
+    let mut worker_handles = Vec::with_capacity(num_workers);
+    for _ in 0..num_workers {
+        let rx = receiver.clone();
+        let worker_config = config.clone();
+        let handle = thread::spawn(move || -> (Vec<Box<dyn QCModule>>, u64) {
+            let mut modules = ModuleFactory::create_modules(&worker_config);
+            let mut count: u64 = 0;
 
-    let mut chunk_modules: Vec<Vec<Box<dyn QCModule>>> = all_sequences
-        .par_chunks(chunk_size)
-        .map(|chunk| {
-            let mut modules = ModuleFactory::create_modules(config);
-            for seq in chunk {
-                for module in modules.iter_mut() {
-                    module.process_sequence(seq);
+            while let Ok(batch) = rx.recv() {
+                for seq in &batch {
+                    for module in modules.iter_mut() {
+                        module.process_sequence(seq);
+                    }
+                    count += 1;
                 }
             }
-            modules
-        })
-        .collect();
-
-    // Phase 3: Merge all chunk results into the first chunk
-    if chunk_modules.len() > 1 {
-        // Take the first chunk as the accumulator
-        let (first, rest) = chunk_modules.split_at_mut(1);
-        let target = &mut first[0];
-
-        for source in rest.iter_mut() {
-            merge_module_sets(target, source);
-        }
+            (modules, count)
+        });
+        worker_handles.push(handle);
     }
 
-    let mut final_modules = chunk_modules.into_iter().next().unwrap();
+    // Drop our copy of the receiver so workers see channel close
+    drop(receiver);
 
-    // Phase 4: Calculate results on the merged modules
+    // Wait for reader to finish
+    reader_handle
+        .join()
+        .map_err(|_| anyhow::anyhow!("Reader thread panicked"))??;
+
+    // Collect worker results
+    let mut worker_results: Vec<(Vec<Box<dyn QCModule>>, u64)> = Vec::new();
+    for handle in worker_handles {
+        let result = handle
+            .join()
+            .map_err(|_| anyhow::anyhow!("Worker thread panicked"))?;
+        worker_results.push(result);
+    }
+
+    // Merge all worker module states into the first worker's state
+    let total_count: u64 = worker_results.iter().map(|(_, c)| c).sum();
+
+    if worker_results.is_empty() {
+        return Ok((ModuleFactory::create_modules(config), 0));
+    }
+
+    let (mut final_modules, _) = worker_results.remove(0);
+    for (mut worker_modules, _) in worker_results {
+        merge_module_sets(&mut final_modules, &mut worker_modules);
+    }
+
+    // Calculate final results on merged state
     for module in final_modules.iter_mut() {
         module.calculate_results(config);
     }
