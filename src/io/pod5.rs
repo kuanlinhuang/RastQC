@@ -10,6 +10,8 @@
 #[cfg(feature = "arrow")]
 use anyhow::{bail, Result};
 #[cfg(feature = "arrow")]
+use arrow::array::Array;
+#[cfg(feature = "arrow")]
 use arrow::ipc::reader::FileReader;
 #[cfg(feature = "arrow")]
 use std::fs::File;
